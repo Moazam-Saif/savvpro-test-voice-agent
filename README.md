@@ -1,83 +1,107 @@
-# Step-by-Step Guide: How to Fork, Clone, and Submit Your Assessment
+# Bright Smile Dental Voice Assistant
 
-**Repository:** https://github.com/savvpro/savvpro-test-voice-agent
+A deterministic, rule-based phone appointment assistant for Bright Smile Dental. The dialogue brain is written in our own Python code; no large language model makes decisions, chooses replies, or controls state transitions.
 
----
+## Features
 
-## Step 1: Fork the Repository
+- End-to-end appointment booking with service, date, time, name, availability, lunch, clinic hours, lead-time, horizon, and conflict checks.
+- Atomic confirmation snapshots: changes made after a readback invalidate the proposal and trigger fresh validation.
+- Identity-guarded cancellation using an exact patient name plus date or a four-digit confirmation code.
+- Emergency escalation for acute symptoms such as severe bleeding, facial swelling, and breathing difficulty.
+- Deterministic NLU for natural English booking, cancellation, rescheduling, information, date, time, service, name, confirmation, and global command variants.
+- Live decision trace showing normalized input, extracted values, polarity, rules fired, state transitions, and effects.
+- Voice and typed input through a Next.js interface.
+- Explicit microphone toggle: click `Speak` to start listening, see the transcript live, then click `Listening` to stop and submit.
+- Stable speech lifecycle handling for browser recognition restarts, delayed events, microphone permission failures, and assistant speech output.
 
-1. Go to the repository: https://github.com/savvpro/savvpro-test-voice-agent
-2. Click the **Fork** button in the top-right corner.
-3. This will create a copy of the repository in your GitHub account.
+## Architecture
 
----
+The system has three main layers:
 
-## Step 2: Clone Your Fork
+- **Frontend**: Next.js 14, React, TypeScript, browser Web Speech API, live transcript, typed fallback, and decision trace UI.
+- **API**: FastAPI REST endpoints for sessions, turns, health, and demo bookings.
+- **Brain and domain**: deterministic Python NLU, policy/state machine, availability rules, booking service, and an in-memory repository.
 
-1. Open your forked repository in your GitHub account.
-2. Click the green **Code** button and copy the URL.
-3. Run the following commands:
+The brain receives text plus optional speech confidence through injected ports. It does not import from the API layer or perform external I/O. Bookings are created only by `BookingService`, which revalidates the proposal before committing.
 
-```bash
-git clone https://github.com/your-username/savvpro-test-voice-agent.git
-cd savvpro-test-voice-agent
+## Requirements
+
+- Python 3.11 or newer
+- Node.js 18 or newer
+- Google Chrome or Microsoft Edge for browser speech recognition and synthesis
+
+## Setup
+
+### Backend
+
+PowerShell:
+
+```powershell
+cd backend
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -e ".[dev]"
+$env:PYTHONPATH = "$PWD\src"
+python -m uvicorn assistant.main:app --host 127.0.0.1 --port 8000 --reload
 ```
 
----
+The backend runs at `http://localhost:8000`.
 
-## Step 3: Read the Task
+- Health check: `http://localhost:8000/health`
+- Demo bookings: `http://localhost:8000/api/demo/bookings`
 
-Open and read **TASK.md** carefully before writing any code.
+If PowerShell blocks script activation, run `Set-ExecutionPolicy -Scope Process Bypass` for the current terminal, or use the environment's Python executable directly.
 
-- TASK.md URL: https://github.com/savvpro/savvpro-test-voice-agent/blob/main/TASK.md
+### Frontend
 
----
+In a second terminal:
 
-## Step 4: Create a New Branch
-
-Branch pattern: `candidate-<your-github-username>`
-
-```bash
-git checkout -b candidate-<your-github-username>
+```powershell
+cd frontend
+npm install
+npm run dev
 ```
 
-**Example:**
-```bash
-git checkout -b candidate-johndoe
+Open `http://localhost:3000` in Chrome or Edge.
+
+## Verification
+
+Backend tests:
+
+```powershell
+cd backend
+$env:PYTHONPATH = "$PWD\src"
+python -m pytest -q
 ```
 
----
+Frontend tests and type checking:
 
-## Step 5: Complete the Task
-
-Build the full application on your branch.
-
----
-
-## Step 6: Push Your Branch
-
-```bash
-git add .
-git commit -m "feat: complete voice-agent assessment"
-git push origin candidate-<your-github-username>
+```powershell
+cd frontend
+npm test -- --run
+npm run typecheck
 ```
 
----
+The current verified suite contains **119 backend tests** and **6 frontend tests**. Backend coverage includes availability boundaries, DST arithmetic, API errors, deterministic behavior, import restrictions, booking scenarios, parser behavior, and 57 natural-English paraphrase cases.
 
-## Step 7: Create a Pull Request
+Run the Windows project check from the repository root:
 
-1. Go to your **forked** repository on GitHub (`https://github.com/your-username/savvpro-test-voice-agent`).
-2. Click **Compare & pull request** (GitHub will show this banner after you push your branch).
-3. Ensure the following settings in the PR form:
-   - **Base repository:** `savvpro/savvpro-test-voice-agent` ← the original repo
-   - **Base branch:** `main`
-   - **Head repository:** `your-username/savvpro-test-voice-agent` ← your fork
-   - **Compare branch:** `candidate-<your-github-username>`
-4. Use the title: `feat: complete voice-agent assessment`
-5. Submit the pull request.
+```powershell
+.\scripts\check.ps1
+```
 
-> 💡 **Tip:** If you don't see the banner, go to the original repo (`savvpro/savvpro-test-voice-agent`), click the **Pull requests** tab, then click **New pull request** → **compare across forks**.
+## Demo Data
 
----
+The demo endpoint exposes seeded fake appointments for cancellation and verification testing. Use `GET /api/demo/bookings` to retrieve current IDs, dates, and confirmation codes. Example patients include Sarah Thompson, Ali Raza, and Maria Gonzalez.
 
-> ⚠️ **Important:** No submissions will be accepted after the deadline.
+## Limitations
+
+- Browser speech recognition and synthesis require a compatible Chrome or Edge environment.
+- Voice input is half-duplex: the microphone is stopped while the assistant speaks.
+- The repository and sessions are in memory; restarting the backend clears them.
+- The model represents one dentist chair and one provider.
+- Numeric dates use US month/day interpretation, such as `10/30`.
+- English is the supported language, with `en-US`, `en-GB`, and `en-IN` locale options.
+- No real patient information, payments, insurance, phone handoff, or persistent database is included.
+
+See [DESIGN.md](./DESIGN.md) for the architecture and behavior specification, and [AI_USAGE.md](./AI_USAGE.md) for AI tooling transparency.

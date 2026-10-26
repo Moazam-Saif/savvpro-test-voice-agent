@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "bright-smile-assistant"
+version = "0.1.0"
+description = "Bright Smile Dental – deterministic rule-based voice assistant"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.111,<0.113",
+    "uvicorn[standard]>=0.29,<0.31",
+    "pydantic>=2.7,<3",
+    "pydantic-settings>=2.2,<3",
+    "python-dotenv>=1.0,<2",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.2,<9",
+    "pytest-asyncio>=0.23,<0.24",
+    "httpx>=0.27,<0.28",
+    "hypothesis>=6.100,<7",
+    "ruff>=0.4,<0.5",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "UP", "B", "SIM"]
+ignore = ["E501"]  # line length handled by formatter
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

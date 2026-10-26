@@ -1,0 +1,853 @@
+I'll read the review document first, since its content isn't in my context yet and the plan needs to reflect every finding.
+BRIGHT SMILE DENTAL LINE: VOICE ASSISTANT FINAL BUILD PLAN (v5)
+Date: October 26, 2026. This plan replaces v2, v3 and v4 and is self-contained. A human or an AI coding agent can execute it top to bottom.
+HOW THIS PLAN WAS BUILT
+* TASK.md is the requirement: a phone-style voice assistant where our own code is the brain and no big AI model decides anything.
+* v2 was the original plan.
+* The review document found five critical gaps (C1 to C5), six contradictions (U1 to U6), seven edge cases (E1 to E7) and one time-zone issue (T1).
+* v4 was the corrected plan, but it was cut off at section 4.5. Its sections 5.5 to 13 were never delivered.
+* v5 keeps every v4 decision and rewrites the missing sections in full: policy rules, flows, failure handling, NLG, trace, API, frontend, tests, schedule, cut order, and the DESIGN.md, README and AI_USAGE skeletons.
+* The v3 text defining findings X1 to X14 was lost. Section 12 re-derives all fourteen and keeps the meanings v4 gave to X4, X5, X7, X10 and X11.
+Sections 4 to 7 are the skeleton of DESIGN.md.
+======================================================================
+SECTION 0. RULES FOR AN AI AGENT (OR HUMAN) EXECUTING THIS PLAN
+1. Read the whole document before writing code. IDs (R13, S7, I4, C3, P0, ASK_SLOT) mean the same thing in code, tests, traces and docs.
+2. Build in the order of section 9. Do not start a step until the previous step's "Done when" is true. Respect the checkpoints and the cut order (section 11).
+3. Build P0 first, then P1. P2 is listed only so you do not invent it. Anything marked Cut must not be built; list it under "Future work" in DESIGN.md.
+4. The brain is our own code: standard library only (plus assistant.domain types and assistant.brain), no network, no system clock, no randomness, no environment access. No AI model decides anything. A test enforces this (8.5).
+5. Every rule has an ID that appears in the trace, and every rule has at least one test. Every invariant I1 to I12 is checked by the stateful test (8.6).
+6. For every P0 state transition, write the scenario test first, watch it fail, then write the policy code.
+7. Safety-critical behavior is fully specified here: confirmation (R13), offers (R14), verification (R11), emergency (R2) and commit (decision 9). Do not invent variations. If a case looks wrong or missing, implement the more conservative behavior: ask instead of guess, never mutate, never disclose, never end the call on ambiguity. Record the question under "Decisions made while building".
+8. Log AI tool usage in AI_USAGE.md as you go (section 10). Real numbers only. If a tool shows no token counts, say so.
+9. Never commit secrets or real personal data. All data is fake.
+10. When this spec is silent, pick the simplest deterministic behavior, record it in DESIGN.md under "Decisions made while building", and move on.
+11. Commit small and often with meaningful messages. A reviewer reads the git history to see how AI was used.
+Priority legend: P0 must ship. P1 ships if on schedule. P2 only with spare time. Cut means do not build.
+Definition of done for the whole project:
+* pytest green: scenarios S1 to S20 (P0), then S21 and up as time allows, plus stateful invariants, determinism, fuzz and the import guard.
+* ruff clean (lint and format check).
+* Frontend lint, typecheck, Vitest and build pass.
+* NLU evaluation report in DESIGN.md with dev and held-out numbers.
+* Secrets grep clean.
+* README, DESIGN and AI_USAGE complete, with usage logs or screenshots in docs/ai-usage/.
+* Pull request open.
+Task constraint (TASK.md): Speech to text and text to speech may use any service (here, the browser). The repo needs README.md, DESIGN.md, AI_USAGE.md (with token logs or screenshots), tests, fake data only, no committed secrets, and a pull request. Extra points go to production-quality structure.
+======================================================================
+SECTION 1. LOCKED DECISIONS
+1. USE CASE. A "Bright Smile Dental" appointment line.
+o Intents: book (P0), cancel (P1), reschedule (defined fallback reply only), and info questions (hours, duration, services).
+o Why: different durations, opening hours, a lunch closure, closed dates and conflicts give real logic to defend.
+o Fallback if time collapses: a barbershop with fixed 30-minute slots.
+2. SPEECH. Browser Web Speech API for speech to text and text to speech, with typed input as a first-class fallback. English only. Locale dropdown (en-US default, en-GB, en-IN).
+o Cost: Chrome or Edge only, audio goes to the browser vendor, accuracy is out of our hands.
+o The brain receives only text plus an optional confidence number, so server-side STT can replace the browser later.
+3. TRANSPORT. Plain REST, one POST per turn. No WebSockets, no streaming.
+o The client retries a failed request with the same turn_no, and the server replays the stored response.
+o The call is half-duplex (mic off while the assistant talks) with no barge-in. Say so plainly in DESIGN.md.
+o Retries can never double-book.
+4. BRAIN. A deterministic rule-based frame/slot dialogue manager with our own date and time parser.
+o Standard library only: re, datetime, dataclasses, enum, difflib, copy, unicodedata, typing.
+o Outside capabilities reach the brain only through injected Ports (clock, booking port).
+5. STACK. FastAPI, pydantic v2, pytest, hypothesis (fuzz and stateful tests), ruff, an in-memory repository behind an interface, and Next.js App Router with TypeScript and Vitest.
+6. SCOPE CUTS (write under "Limitations" in DESIGN.md).
+o No phone numbers, one dentist and one chair, no insurance or payments, English only.
+o US-style numeric dates ("10/30" is October 30).
+o No live human handoff. In the web demo, TRANSFER means "staff will call you back" and the call ends. Because no phone number is collected, say honestly that the callback is simulated.
+o No reschedule flow in P0 or P1.
+7. IDENTITY. A name alone never reveals or changes an appointment.
+o Cancel needs the name plus the appointment date, or the confirmation code.
+o Names match exact-then-close, never closest-wins.
+o Appointment details are spoken only after verification.
+o This is still a demo-grade check (4-digit codes, per-session attempt cap only). Document it.
+8. RUNTIME. A single uvicorn worker with in-memory sessions and repository. Multiple workers would split state. A restart loses sessions and bookings together, so no session can claim a booking that no longer exists.
+9. COMMIT RULE. The only way a booking is created is BookingService.book(proposal).
+o The engine calls it as the last step of a turn, from a Proposal read back in the previous reply and confirmed in this one (R13).
+o The service revalidates every domain rule under the repository lock.
+o So "unconfirmed or invalid bookings never happen" holds even if the brain has a bug (I1 to I3).
+o The same shape applies to cancel (CancelProposal).
+10. TIME RULE (T1). The clock returns an aware UTC instant. Two functions, to_local and local_to_utc, are the only conversions. Everything else uses naive clinic-local wall-clock datetimes. See 4.1.
+11. SAFETY POSTURE. Ambiguity produces one clarifying question. It never produces a mutation, a disclosure, or the end of the call. The one exception is the strike valve (R16).
+12. RESCHEDULE is not built in P0 or P1. Any reschedule request, including "move that", gets one defined reply offering cancel-and-rebook or a callback (U2). There is no half-shipped flow.
+13. STRIKE VALVE. Every loop has a counter and an exit to a human (R16). The call can never trap a caller forever and can never silently drop a caller who is merely confusing.
+======================================================================
+SECTION 2. PRIORITIES
+P0 (MUST SHIP)
+* Book flow: 
+o availability check, alternatives (including the empty case), "earliest available" with no date
+o mid-call corrections including negation and self-repair ("Friday, no wait, Saturday")
+o readback, Proposal snapshot with a fresh readback after any change, spoken confirmation code
+* Implicit intent ("I need a cleaning on Friday" means BOOK), from positive signals only.
+* Booking for someone else, with separate caller and patient names.
+* Polarity-aware intent, value and symptom extraction.
+* Basic emergency detection (about 30 lines, safety-relevant).
+* Typed OfferSets and their lifecycle (R14).
+* Incremental validation: each slot is checked as soon as it is filled.
+* Command gating: commands never eat content.
+* Atomic commit through BookingService with re-validation.
+* Whole-word matching, digit and formatted STT input, homophone map.
+* Multi-slot utterances where valid values survive an invalid one (E5).
+* Decision trace panel; frontend with mic, typed fallback and backend-failure handling.
+* Tests: scenarios S1 to S20, stateful invariants, fuzz, determinism, import guard, STT-noise cases.
+* NLU evaluation set with a held-out slice and an accuracy report.
+* README, DESIGN, AI_USAGE, PR.
+P1
+* Cancel flow with strict verification and a CancelProposal.
+* Info questions, including closed dates.
+* Silence, no-match and filler ladders.
+* Repeat, hold, start over, human callback, "are you a robot" honesty.
+* Emergency temporal clarification (NOW_YN).
+* Out-of-scope replies (price, insurance, address, parking, medical advice).
+* Compound-intent rule (R15).
+* RESCHEDULE fallback reply.
+* Multi-task calls after a booking.
+* Multi-value clarification.
+* Weekday and date conflict.
+* Relative corrections (later, earlier, same time, same day).
+* Session and retry boundary tests.
+P2 (CUT FIRST)
+* Reschedule flow.
+* Preference qualifiers other than "earliest" (around, after, before, anytime) and "between X and Y".
+* Fuzzy service typos, "cancel all", profanity handling, queued compound intents.
+* GitHub Actions CI, Makefile, mypy.
+CUT (DO NOT BUILD)
+* Spelled-out names ("m o a z a m").
+* The dependency-invalidation matrix. It is replaced by one rule: any slot change re-runs full validation and destroys the Proposal.
+* Low-confidence name micro-confirm, barge-in, server-side STT, auth, persistence.
+3-HOUR FALLBACK
+* P0 only, with a minimal frontend (transcript plus plain JSON trace).
+* The eval set shrinks to 40 utterances.
+* Add cancel only if S1 to S13 are green at the 1:50 mark of the shortened plan.
+======================================================================
+SECTION 3. REPO LAYOUT
+voice-assistant/
+README.md DESIGN.md AI_USAGE.md .gitignore .env.example
+docs/ai-usage/ token screenshots and exported usage logs
+scripts/check.sh runs every gate in 8.10
+backend/
+pyproject.toml
+src/assistant/
+main.py app factory, CORS, routers, global exception handler
+config.py ASSISTANT_NOW, CLINIC_TZ, CORS_ORIGINS, DEMO_ENDPOINTS_ENABLED, LOG_UTTERANCES
+clock.py Clock protocol, SystemClock, FixedClock, to_local, local_to_utc
+api/routes.py api/schemas.py
+sessions.py SessionStore: 30 min idle TTL, lazy cleanup, per-session lock, 200-turn cap
+domain/
+models.py hours.py services.py repository.py seed.py
+availability.py check_date, check_time, is_free, alternatives, find_next_available
+service.py BookingService and BookingPort: the only writer of bookings
+codes.py CodeGenerator: unique, seedable
+brain/
+types.py Phase, Pending, Frame, Proposal, CancelProposal, OfferSet, Counters, Session, TurnInput, TurnResult, Trace
+ports.py Ports(clock, bookings): the only way the brain touches the outside
+normalize.py lexicon.py homophones.py clauses.py polarity.py
+nlu/ intents dates times services yesno names options commands deltas fillers oos emergency codes
+policy.py rules R0 to R16
+nlg.py templates
+engine.py Brain.handle(session, turn_input, ports) -> TurnResult
+tests/
+domain/ nlu/ scenarios/ invariants/ api/ nlu_eval/
+test_import_guard.py test_determinism.py test_fuzz.py
+frontend/
+app/page.tsx components/ hooks/ lib/api.ts
+Architecture rule: nothing in brain/ imports from api/ or does I/O. It takes state plus input plus ports and returns state plus reply.
+The engine:
+1. works on a deep copy of the session;
+2. runs the policy, which returns a Decision (state changes plus at most one requested effect: book or cancel);
+3. executes that effect as the very last step;
+4. feeds the effect result back to the policy for the outcome (success, SlotTaken, InvalidSlot);
+5. renders the reply and builds the trace;
+6. swaps the new state in.
+If anything raises, the old state is kept. This is the strongest point in DESIGN.md.
+Production hygiene (extra points):
+* Typed code, pydantic schemas at the API edge, ruff configured in pyproject.
+* Structured logging with no PII (section 6).
+* /health endpoint, .env.example with non-secret config only, one command to run every gate.
+* Pinned dependency ranges and a short Dockerfile (P2).
+======================================================================
+SECTION 4. DOMAIN SPEC
+4.1 CLINIC RULES
+TIME HANDLING (T1).
+* Clock.now_utc() returns an aware UTC instant.
+* to_local(utc) converts once to a naive datetime in CLINIC_TZ (default America/New_York, via zoneinfo).
+* local_to_utc(naive) is its inverse with fold=0.
+* These are the only conversions in the codebase. The brain sees only naive local time through Ports.now_local().
+* Past, lead-time and horizon checks compare through local_to_utc, so an elapsed-time rule is never computed by subtracting naive datetimes across a clock change.
+* Config load asserts that no open window intersects 00:00 to 04:00, so a slot can never fall in a spring-forward gap or a fall-back repeat. A test proves it for every weekday.
+* Both transitions fall on Sundays, when the clinic is closed.
+* With the real clock, the demo's 14-day seed window starting 2026-10-26 crosses the November 1 fall-back, so this is a live case.
+Required time tests:
+(a) Real elapsed time from Saturday 2026-10-31 20:00 EDT to Monday 2026-11-02 09:00 EST is 38 hours, not 37.
+(b) Lead-time boundary on Monday 2026-11-02: at now 06:59:59 local, 09:00 is TOO_SOON; at now 07:00:00 it is allowed.
+(c) The same two checks around Sunday 2027-03-14.
+(d) FixedClock on Saturday evening 2026-10-31.
+(e) The open-window assertion.
+HOURS
+* Mon to Fri 09:00 to 17:00 with a lunch closure 13:00 to 14:00 (open windows 09:00 to 13:00 and 14:00 to 17:00).
+* Sat 10:00 to 14:00. Sun closed.
+DAY PARTS (by start time)
+* MORNING means a start before 12:00.
+* AFTERNOON means a start at or after 12:00. Lunch is handled by availability, not by the window.
+* v2's "afternoon is 14:00 to 17:00" is empty on Saturdays and its "morning from 09:00" is wrong on Saturday (X1, X4).
+CLOSED DATES
+* CLOSED_DATES: dict[date, str], for example "Staff training day".
+* Seeded relative to the clock: the first non-Sunday date at least 9 days ahead, so "are you open on that day" has a real answer (X11).
+GRID AND LIMITS
+* Slot grid 30 minutes, booking horizon 60 days, minimum lead time 2 hours.
+SERVICES (minutes)
+* cleaning 30, checkup 30, filling 60, whitening 60, extraction 60, root canal 90.
+BOOKING RULE
+* A booking occupies contiguous grid slots, must start and end inside one open window, and cannot overlap the closure or another booking.
+* Last valid start = window end minus duration.
+* Booking fields: id, name, service, start, end, code (4 digits), created_at.
+4.2 REPOSITORY (Protocol, in-memory implementation)
+* list_bookings(date) -> list[Booking]
+* find_by_name(name, include_past=False) -> list[NameMatch(booking, tier)] 
+o Normalization: casefold, strip punctuation, collapse whitespace, drop titles (mr, mrs, ms, dr).
+o Tier EXACT means the normalized full names are equal. Tier CLOSE means difflib ratio >= 0.85 on the full name.
+o No last-name-only matching (X7). Past bookings are excluded by default.
+o Sorted by (tier, start).
+* find_by_code(code) -> Booking | None
+* book(booking) -> Booking 
+o Raises SlotTaken on overlap.
+o Raises DuplicateBooking (a subclass of SlotTaken) if the same person (normalized name) already has an overlapping booking.
+* cancel(id) -> bool
+* reschedule(id, new_start) -> Booking. P2 only, atomic: check the new slot, then swap, otherwise leave the old booking untouched.
+All mutations run under one threading.RLock. Codes come from an injected CodeGenerator: 4 digits, seedable, retrying until unique among all bookings (X10). The brain never generates codes and never sees the repository.
+4.3 BookingService AND BookingPort (domain/service.py)
+BookingService is the only writer of bookings.
+* book(proposal) runs under the repository lock. It re-runs check_date and check_time (lead time, horizon, grid, hours, lunch), checks overlap and duplicates, and either creates the booking with a fresh code or raises InvalidSlot(reason) or SlotTaken. So an invalid or occupied slot cannot be booked even if the brain asks for it (I3).
+* cancel(booking_id) and get(booking_id) complete the writer side.
+BookingPort is the Protocol the brain sees: is_free, alternatives, find_next_available, find_by_name, find_by_code, get, book, cancel. Ports = (clock, bookings: BookingPort). Test doubles implement BookingPort, which is how the stateful tests inject faults such as a slot that disappears between readback and commit (E1).
+4.4 AVAILABILITY FUNCTIONS (pure, table-tested, all take now_utc explicitly)
+check_date(date) -> ok | reason: PAST, BEYOND_HORIZON, CLOSED_DATE, CLOSED_DAY.
+check_time(date | None, time, duration | None) -> ok | reason: PAST, TOO_SOON, OFF_GRID, LUNCH, BEFORE_OPEN, AFTER_CLOSE.
+* With no date yet, check only against the widest hours and skip the lunch test.
+* With no service yet, assume 30 minutes.
+* If the service or date changes later, validation re-runs. A root canal at 4:30 now fails with AFTER_CLOSE. A 1 PM start valid for no date fails with LUNCH once the date is a weekday.
+* A start inside an open window whose end passes that window's end returns LUNCH if the window ends at lunch, otherwise AFTER_CLOSE (X3).
+Reason precedence when several apply: PAST, BEYOND_HORIZON, CLOSED_DATE, CLOSED_DAY, TOO_SOON, OFF_GRID, LUNCH, BEFORE_OPEN, AFTER_CLOSE. Only the first is reported.
+Reason context (X5). Every reason carries that day's open and close times, the last valid start for the service, the last valid start before lunch (when relevant) and the service duration, so messages are exact for the day and service. Saturday opens at 10, not 9.
+is_free(start, duration) -> bool
+alternatives(date, time, duration, excluded, rejected, n=2) -> list[SlotOption]
+* Same-day free starts ordered by distance in minutes from the requested time (ties go to the earlier start), preferring one before and one after.
+* If the day yields fewer than 2, fill from the next days that have an opening within the horizon, each contributing the free start closest to the requested time.
+* Never more than 3 options in total.
+* Honors excluded (weekdays, dates, windows by start time) and rejected (starts already refused).
+* May return an empty list.
+find_next_available(service, from_dt, window=None, excluded, rejected, n=1) -> list[SlotOption]
+* First free starts, chronological, on or after max(from_dt, now + lead time), within the 60-day horizon.
+* With no date (U4), the caller passes from_dt = now. The first result is then the earliest eligible start on or after now plus two hours that lies inside clinic hours and is not excluded or rejected.
+* Returns an empty list if nothing exists within the horizon.
+4.5 SEED DATA (fake only)
+* A fixed-seed generator fills about 35% of slots over the next 14 days relative to the injected clock. It never fills the past, closed dates or Sundays (X2), so conflicts show up in every demo.
+* Fixed bookings are placed first and the random fill avoids them: Sarah Thompson (two bookings on different days, to test disambiguation by date), Ali Raza, Maria Gonzalez.
+* All fixed bookings sit at least 3 hours in the future and on open days.
+* Codes for seeded bookings come from the seeded generator and are listed by the demo endpoint (section 6).
+* Test fixtures, not demo data, add near-name decoys (Sara Thomson, and a second same-day booking for one patient) for the verification tests (S22).
+* Tests never depend on the random fill: they build repositories explicitly.
+======================================================================
+SECTION 5. BRAIN SPEC
+5.1 PRINCIPLES
+1. Deterministic. Same state plus same input gives the same output. Template variants are chosen by turn_index % n, never randomly.
+2. One question per turn. Replies stay under about 25 words (readbacks and info answers up to 35, a compound reply under R15 up to 45). Spoken lists never exceed 3 items. The one exception is INFO_SERVICES, spoken as two groups of three; the UI also shows the list as text.
+3. Readback before commit. Every date and time is read in unambiguous form before anything is booked or cancelled. The readback is the safety net for parser ambiguity and STT errors, and what the caller confirms is a snapshot (R13).
+4. Latest value wins, and the change is acknowledged out loud. Negation and exclusion ("not Friday", "can't do mornings") are respected, not treated as new values.
+5. Every loop has a counter and an exit to a human. The strike valve is R16.
+6. Every decision writes a trace entry. The UI renders the trace.
+7. A command word never overrides content. Commands fire only if they are the whole utterance or nothing else was extracted. Exception: HUMAN always wins.
+8. Validate each slot as soon as it is filled, not when everything is filled.
+9. No details before verification. The brain never reveals a booking's service or time until the caller is verified (R11).
+10. The brain never raises. The engine wraps every turn and converts any exception into a spoken recovery line with unchanged state.
+11. Whole-word matching only. Keywords match on token boundaries ("exam" must not match "example", "close" must not match "closest", "fill" must not match "fill out").
+12. Only positive signals act. A negated intent, symptom or value never starts a flow, fires an emergency, fills a slot or wins intent scoring (C1, C2).
+13. Ambiguity is one question. It never causes a mutation, a disclosure, or the end of the call.
+14. Pending is authoritative for bare answers. A bare "five", "yes" or "the second one" means what the current pending state says it means (E4).
+5.2 PER-TURN PIPELINE
+TurnInput(type, text, confidence, turn_no)
+R0 session ended? refuse
+R1 silence event or empty text? ladder (hold grace honored)
+normalize(text); split into clauses; run ALL extractors per clause with polarity: intents, service, date, time, window, name, code, yes/no, option pick, commands, filler, out-of-scope, emergency, relative deltas, repair cues
+R2 emergency (positive, current only; ambiguous goes to NOW_YN)
+R3 global commands (gated)
+R4 filler and hold
+R5 out-of-scope
+R6 interpret by pending (yes/no, option pick via OfferSet, bare answers)
+R7 intent update and flow switch (positive signals only); R15 compound intent
+R8 slot fill, overwrite, negation, repair, relative delta
+R9 incremental validation (full revalidate(frame) on any change)
+R10 availability
+R11 verification (cancel)
+R12 choose next action (builds Proposal or CancelProposal, which becomes the readback)
+R13 confirmation and commit (the only place an effect is requested)
+R14 OfferSet lifecycle (applied whenever offers are created, resolved or dropped)
+R16 strike valve (counters)
+Then the engine executes at most one effect LAST, NLG renders, the trace is built, and the state is swapped in.
+5.3 STATE
+ENUMS
+* Phase: GREETING | COLLECTING | IDENTIFYING | CHOOSING_OPTION | CONFIRMING | AWAITING_MORE | ENDED
+* Pending: NONE | INTENT | SERVICE | DATE | TIME | NAME | VERIFY | CONFIRM_YN | CANCEL_YN | OPTION | CHANGE_WHICH | ANYTHING_ELSE | HUMAN_YN | NOW_YN
+* EndReason: GOODBYE | SILENCE | TRANSFER_CALLBACK | HANGUP | TURN_LIMIT
+SESSION (lives for the whole call)
+session_id, turn_index, last_turn_no, last_response (for idempotency), frame, carry_exclusions (negated-only values heard before any flow exists), counters, last_booking (id, summary, code), verified_booking_ids, hold_grace, filler_streak, ended, end_reason.
+FRAME (reset after every completed or abandoned task)
+* intent, service, date, time
+* time_window (MORNING | AFTERNOON | None)
+* date_hint (NEXT_WEEK | THIS_WEEKEND | None)
+* week_anchor (the Monday of the hinted week)
+* pref_mode (EARLIEST in P0 and P1; AROUND, AFTER, BEFORE, ANYTIME are P2)
+* ambiguous_ampm, urgent
+* name (the patient's name), caller_name (E2), for_other
+* exclusions {weekdays, dates, windows, services}, rejected_starts
+* offers (an OfferSet or None), proposal, cancel_proposal
+* verify (VerifyState), last_prompt, resume_pending
+VERIFYSTATE (kept apart from booking slots, R11)
+lookup_name, lookup_date, lookup_code, candidate_ids (internal only, never spoken), verified_id.
+PROPOSAL (frozen snapshot, R13)
+service, patient_name, start, end, duration, for_other, created_turn. It exists only while pending=CONFIRM_YN and the last spoken prompt is its readback.
+CANCELPROPOSAL (frozen snapshot, X9)
+booking_id, service, start, created_turn. Same lifecycle with pending=CANCEL_YN.
+OFFERSET (R14)
+offer_id (the turn_index at creation), kind (SLOT | VALUE), value_slot (for VALUE: service, date, time or intent), options (1 to 3 SlotOptions, numbered from 1), created_turn.
+SLOTOPTION
+start (datetime or None), slot, value, label. SLOT options carry a start. VALUE options carry a slot name and value ("a filling or a cleaning?", "Friday or Saturday?", "12:30 or 2 PM?").
+COUNTERS
+silence, nomatch, reject, slot_attempts {slot: n}, verify_failures (session-wide, never reset by a new flow), oos_streak, human_offers, neg_only_streak, lowconf_streak, noprogress (R16).
+STATE LIFECYCLE (U6, E3). What survives each event:
+* service, date, time, name 
+o Slot correction: replaced if the same slot.
+o Preference change to earliest: date, time, window, hint and anchor are cleared; service and name are kept.
+o Offer rejected or replaced: kept.
+o Flow switch, start over, task end: the frame is discarded.
+* exclusions 
+o Slot correction and preference change: kept. An explicit positive pick of an excluded value removes that exclusion, acknowledged out loud.
+o Offer rejected or replaced: kept.
+o Flow switch: discarded. Start over: discarded, along with carry_exclusions. Task end: discarded.
+* rejected_starts 
+o Slot correction and preference change: kept.
+o Offer rejected: the rejected starts are added.
+o Flow switch, start over, task end: discarded.
+* date_hint and week_anchor 
+o Slot correction: replaced by an explicit date.
+o Preference change to earliest: cleared. Offer rejected or replaced: kept.
+o Flow switch, start over, task end: discarded.
+* pref_mode 
+o Slot correction: cleared by an explicit date or time.
+o Preference change: set. Offer rejected or replaced: kept.
+o Flow switch, start over, task end: discarded.
+* proposal and offers 
+o Any slot change: the proposal is destroyed and offers are dropped (R13, R14).
+o Preference change: destroyed and dropped.
+o Offer rejected or replaced: offers dropped.
+o Flow switch, start over, task end: destroyed and dropped.
+* last_booking 
+o Kept through corrections, preference changes, offers and flow switches.
+o Replaced if a booking was made. Cleared if it was the cancelled booking.
+* verified_booking_ids: kept through everything except a cancel (the cancelled id is removed) and session end.
+* counters 
+o nomatch and slot_attempts reset on success. Offer rejected: reject++.
+o Flow switch, start over, task end: reset everything except verify_failures. Cancel done: same.
+Also:
+* last_booking and verified ids are dropped at session end or expiry.
+* A stored id whose booking no longer exists (get() returns None) is treated as unknown.
+5.4 NLU RULES
+NORMALIZE
+* Unicode NFKC, lowercase, curly quotes to straight, "a.m." to "am", "p.m." to "pm", "o'clock" dropped.
+* Accept both digit and word forms: "five thirty" becomes "5 30", "twenty first" becomes "21st". "5:30 p.m.", "October 30th", "10/30" and "10-30" (month/day) reach the parsers intact, because Chrome often returns digits and formatted strings.
+* Strip punctuation except : , ' - / (commas still delimit clauses), and collapse whitespace.
+* Keep the original string for names and for the trace.
+* Tokenize once. Every lexicon match runs on token sequences (whole words).
+HOMOPHONES (applied only when the token stands alone, follows "at", "around" or "by", or the utterance has 3 tokens or fewer, so "for Friday" is untouched)
+* Pending TIME, DATE, OPTION or VERIFY: to or too becomes 2; for becomes 4; ate becomes 8; won becomes 1.
+* Pending CONFIRM_YN, CANCEL_YN, ANYTHING_ELSE, HUMAN_YN or NOW_YN: "know" becomes "no".
+CLAUSES AND POLARITY (C1, C2, E5)
+* Split into clauses on commas, semicolons, periods, "but", "and then", "actually", "instead", "wait". "Friday or Saturday" stays one clause (multi-value).
+* Negation cues: not, no (directly before a value), never, without, n't contractions (don't, doesn't, isn't, can't, won't), "can't do", "cannot do", "don't want to", "anything but", "other than", "except", "instead of".
+* A cue negates the matching extractions in its clause that come after it, up to the clause end or 4 tokens, whichever is first. "My face isn't swollen" negates "swollen". "I don't want to cancel; I want to book" gives CANCEL negative in clause 1 and BOOK positive in clause 2.
+* Repair cues: "no wait", "actually", "I mean", "sorry", "scratch that", "make that", "rather".
+* Within one utterance, if a repair cue is followed by a positive value for a slot that already has a positive value earlier in the utterance, the earlier value is replaced, not excluded. "Friday, no wait, Saturday" gives Saturday. "Not Friday" gives an exclusion. "Friday, no Saturday" gives a repair.
+* Every extraction is emitted as Extracted(slot, value, span, polarity, clause, extractor). Polarity is POS or NEG.
+* A POS value for a slot in the same utterance beats a NEG value for it ("not Friday, Thursday" gives Thursday).
+* A NEG-only value is added to exclusions, clears the slot if it holds that value, and the assistant asks again ("Okay, not Friday. Which day works?").
+NEGATED-ONLY UTTERANCE IN AN EMPTY SESSION ("Not Friday", "I can't do mornings", "Anything but a cleaning")
+* Store in session.carry_exclusions and do not start a flow.
+* Reply "Okay, noted. What can I help you with?" with pending=INTENT.
+* neg_only_streak++, and from the second in a row it counts as a no-match.
+* When a booking flow later starts, carry_exclusions move into the frame (C2).
+IMPLICIT BOOK needs at least one POS service, date or time. Exclusions alone, or an intent with NEG polarity, never count.
+INTENT SCORING
+* Weighted keyword table over POS clauses only. The score is the sum of matched weights. Ties go to the earliest match in the sentence. Threshold 1.0.
+* BOOK: book 2, schedule 2, make an appointment 2, appointment 1, come in 1, see the dentist 1.5, set up 1, availability 1, any openings 1, earliest available 1.5, next available 1.5, first available 1.5, soonest 1.5, as soon as possible 1.5.
+* BOOK with the urgent flag: toothache, tooth hurts, tooth pain, chipped tooth, broken tooth. These score BOOK 1.5 and set Frame.urgent=True. The reply starts "Sorry to hear that."
+* CANCEL: cancel 3, call off 2.5, delete 2, don't need 1.5, can't make it 2.5, cannot make it 2.5, won't be able to come 2.5.
+* RESCHEDULE: reschedule 3, change my appointment 2.5, move 2, push back 2, different day 1.5.
+* INFO_HOURS: hours 2, open 1.5, close 1.5, what time do you 2.
+* INFO_DURATION: how long 2.5.
+* INFO_SERVICES: what do you offer 2.5, what do you do 2, services 2.
+* Precedence: CANCEL and RESCHEDULE beat BOOK when both match ("cancel my appointment" contains "appointment"). "Cancel and rebook" means RESCHEDULE. "Change", "switch" and "make it" while a frame is active are slot corrections (R8), not RESCHEDULE.
+* Implicit intent: with no active flow and no intent scoring 1.0 or more, a POS service, date or time means BOOK (R7).
+SERVICE EXTRACTION (whole-word synonym lexicon)
+* cleaning (clean, scale and polish, hygiene)
+* checkup (check up, check-up, exam, consultation)
+* filling (cavity, fill)
+* whitening (whiten, bleach)
+* extraction (pull, tooth out, remove a tooth)
+* root canal
+* Negative phrases that never count: "fill out", "fill in", "fill up".
+* P2: fuzzy fallback for single tokens with difflib ratio >= 0.85.
+DATE PARSER (reference date = injected clock; output is a date, a hint, a preference, a conflict, or an error code)
+* today, tomorrow, day after tomorrow, "in N days".
+* Weekday alone ("friday"): next occurrence strictly after today (today Friday means +7). If week_anchor is set, resolve inside that week.
+* "this friday": next occurrence on or after today.
+* "next friday": that weekday in the next Monday-to-Sunday week. This is ambiguous between speakers; document it in DESIGN.md, and the readback covers it.
+* "the 3rd", "on the 21st": next future occurrence of that day number.
+* "november 3", "3 november", "3rd of november", "11/3", "11-3": nearest future year. December to January rolls the year.
+* "next week" sets date_hint=NEXT_WEEK and week_anchor. "This weekend" sets THIS_WEEKEND. The assistant asks which day.
+* "asap", "soonest", "sometime soon" set pref_mode=EARLIEST.
+* Trailing windows ("tomorrow morning", "friday afternoon") set time_window.
+* Weekday plus date that disagree ("friday the 30th" when the 30th is a Saturday) returns CONFLICT with both readings. The policy creates a VALUE OfferSet: "The 30th is a Saturday. Did you mean Friday the 29th or Saturday the 30th?"
+* For verification lookups (lookup_date), use the same parser, but a weekday alone means the nearest upcoming occurrence on or after today.
+TIME PARSER
+* Forms: "5pm", "5 pm", "5:30", "5 30", "5:30 p.m.", "17:30", "half past five", "quarter to six", "quarter past 3", "noon", "midday".
+* Windows: "morning" means a start before 12:00; "afternoon" means a start at or after 12:00 (lunch handled by availability). "Evening" returns the OUT_OF_HOURS hint.
+* Bare hour with no am/pm: try both readings against the target day's hours (widest hours if no date yet). 
+o Exactly one valid: take it.
+o Neither valid: guess PM for 1 to 6 and AM for 7 to 11, then R9 reports the real reason.
+o Both valid: take the guess and set ambiguous_ampm, which forces the readback to say AM or PM explicitly.
+* Off-grid minutes ("3:15"): never snap silently. "We book on the half hour. Would 3 or 3:30 work?" (a VALUE OfferSet on time).
+* P2: "around X", "after X", "before X", "anytime", "between X and Y".
+MULTIPLE VALUES FOR ONE SLOT
+* Two distinct positive values for service, date or time in one utterance ("a filling and a cleaning", "Friday or Saturday", "2 or 4") create a VALUE OfferSet (max 3): "Which would you like, the filling or the cleaning?" "Either" takes the first.
+RELATIVE CORRECTIONS
+* Deltas apply to current frame values. P1 covers later/earlier, same time and same day. P2 covers the rest.
+* Forms: "(an|one) hour later/earlier", "half an hour later", "30 minutes earlier", "a bit later" (+30), "the day after", "the day before", "same day", "same time", "same time next week", "a week later".
+* If the target slot is empty and there is no last_booking, treat it as a no-match with a specific re-ask.
+YES AND NO
+* Yes: yes, yeah, yep, sure, correct, right, that's right, ok, okay, sounds good, go ahead, please do, perfect.
+* No: no, nope, nah, not really, wrong, that's wrong, incorrect.
+* Interpreted only when pending is CONFIRM_YN, CANCEL_YN, ANYTHING_ELSE, HUMAN_YN, NOW_YN or OPTION; otherwise ignored (X8: a stray "yes" never commits anything).
+* A yes or no together with slot values ("no, make it Thursday", "yes but 4 pm") is a correction: apply the slots, then re-confirm. It is never a confirmation (I2).
+* A "no" with an abandon cue ("no, never mind", "forget it", "cancel that" during a booking readback) is an abandonment. A bare "no" is a refusal to commit, handled by R13.
+OPTION PICKING (defined by R14, resolved against the current OfferSet only)
+* Forms: "the first/second/third", "the earlier/later one", "number two", "option one", or a time or date value that exactly matches one option.
+* With exactly one option, "yes" or "that one" picks it.
+* With two or more, a bare "yes" gets "Which one, the first or the second?" (CLARIFY_OPTION, not a no-match).
+* "Either", "whichever", "any" take the first. "Neither", "none of those", "no" reject.
+NAMES (E2)
+* Patterns: "my name is X", "this is X", "it's X", "I'm X", "X speaking".
+* With pending=NAME or VERIFY accept a bare answer: strip fillers (uh, um, it's, yeah), take up to 3 tokens, and reject if any token is a digit, a stop-word, a service or a weekday word. Titlecase the result.
+* Relations ("for my son", "my wife", "my mother", "my friend", "my kid", "someone else", "for him", "for her") set for_other=True. It is never a transfer. "For my son Ali" sets patient=Ali directly.
+* While for_other is False, "I'm X" sets the patient name (the caller is the patient) and caller_name=X.
+* While for_other is True, "I'm X" sets caller_name only, never the patient. The assistant asks "What's the patient's name?" and a bare answer sets the patient.
+* Self to other ("Book for me, actually for my son Ali"): for_other=True and the patient is replaced (cleared if no name given).
+* Other to self ("actually it's for me"): for_other=False and patient=caller_name if known, otherwise ask "What's your name?".
+* Any patient change destroys the Proposal (R13).
+* Lookup names for verification go to VerifyState.lookup_name, never to Frame.name.
+CONFIRMATION CODE
+* 4 digits, read from digits or number words ("four seven two nine", "forty seven twenty nine").
+* Extracted only when pending is VERIFY or NAME, or the utterance contains "code" or "confirmation".
+* Goes to VerifyState.lookup_code.
+FILLERS
+* An utterance made only of um, uh, er, ah, hmm, mm-hmm, mhm, uh-huh, well, "let me think". Not a no-match.
+OUT-OF-SCOPE GROUPS
+* PRICE: price, cost, how much, insurance, pay, payment, fee, discount.
+* LOCATION: address, where are you, location, directions, parking.
+* MEDICAL: should I take, antibiotic, painkiller, medicine, is it normal, is it safe.
+EMERGENCY (C1, E6)
+* Phrases: severe pain, bleeding, swollen face, knocked out, can't breathe, cannot breathe, trouble breathing.
+* Classified per clause: 
+o NEGATED (a negation cue in scope: "my face isn't swollen", "no bleeding"): ignored.
+o PAST (a past-tense or past-time cue with no present cue: "was knocked out yesterday", "had severe pain last week"): ambiguous, ask NOW_YN.
+o PRESENT (everything else, including present tense and mixed with a booking request): fires R2.
+o AMBIGUOUS (a bare phrase with no tense cue: "knocked out tooth"): ask NOW_YN.
+* The conservative rule: a PAST or AMBIGUOUS match is never silently ignored. A booking request in the same utterance never suppresses a PRESENT match.
+GLOBAL COMMANDS
+* Gating: a command fires only if (a) it is the whole utterance after removing fillers and politeness words (please, ok, so, um), or (b) nothing else was extracted: no slot value, no intent scoring 1.0 or more, no yes/no, no option pick.
+* Otherwise the command word is treated as filler and the content is processed ("wait, make it Thursday" applies Thursday and says "Okay, Thursday instead.").
+* HUMAN is the one exception: it always fires, so a caller can always escape.
+* Precedence when several match: emergency PRESENT, HUMAN, ROBOT, then the rest.
+Commands:
+* ROBOT (checked first). Phrases: are you a robot, a real person, human, a machine, automated, is this a robot. Reply: "Yes, I'm an automated assistant. I can book or cancel appointments, or ask staff to call you back." Then re-ask last_prompt.
+* REPEAT. Phrases: repeat, say that again, pardon, come again, what was that, sorry what; bare "what" only as the whole utterance. Resend last_prompt unchanged. No counter change.
+* HOLD. Phrases: hold on, wait, one second, one moment, give me a minute, hang on, let me check, let me check my calendar, let me look. Reply: "Sure, take your time." State untouched. hold_grace=2.
+* START_OVER. Phrases: start over, start again, forget it, never mind. Wipe the frame (see lifecycle table): "No problem, starting fresh. How can I help?"
+* HUMAN. Phrases: human, agent, operator, real person (when not ROBOT), speak to someone, talk to someone, receptionist, a person. Offer a callback (HUMAN_YN). "Someone else" is NOT here.
+* BYE. Phrases: bye, goodbye, that's all, hang up. Reply "Goodbye" and END. Any open Proposal is dropped and nothing is booked.
+5.5 POLICY RULES (each ID appears in rules_fired in the trace)
+R0. SESSION ENDED. The API returns 409. The brain itself refuses the turn with no state change and no mutation.
+R1. NO-INPUT LADDER. Triggers: type=silence, or empty or whitespace-only text.
+* While hold_grace > 0: decrement it and return action HOLD with an empty reply. The frontend keeps listening. No ladder.
+* Otherwise silence++: 
+o 1: re-ask last_prompt with "Are you still there?"
+o 2: a shorter re-ask with an example.
+o 3: "I'm not hearing anything, so I'll end the call. Please call back any time." End with SILENCE. An open Proposal is dropped and nothing is booked.
+* Any real utterance resets the counter. A hangup event ends the session silently (HANGUP).
+R2. EMERGENCY (positive and current only).
+* PRESENT: reply "If this is a medical emergency, please call emergency services now. Shall I ask our staff to call you?" with pending=HUMAN_YN. 
+o Save resume_pending and drop the Proposal and offers, because this reply does not end with a readback.
+o Slots extracted in the same utterance are still applied, so the caller need not repeat them.
+o HUMAN_YN "no" resumes by re-asking last_prompt.
+* PAST or AMBIGUOUS: "Just checking: is this happening right now?" with pending=NOW_YN. Yes goes to the PRESENT reply. No resumes the flow.
+R3. COMMANDS, gated as in 5.4. REPEAT and HOLD never destroy a Proposal because last_prompt stays the readback.
+R4. FILLER. Action WAIT, empty reply, no counter change, filler_streak++. At 3 in a row, treat as silence (R1). Any other utterance resets the streak.
+R5. OUT-OF-SCOPE. A specific reply from the group, for example "I can't help with pricing or insurance on this line, but staff can." Then re-ask last_prompt. Does not touch nomatch. oos_streak++, and at 3 offer HUMAN_YN.
+R6. PENDING INTERPRETATION. Resolve yes/no, option picks and bare answers by pending.
+* CONFIRM_YN and CANCEL_YN: see R13.
+* OPTION: see R14.
+* HUMAN_YN: 
+o Yes: TRANSFER with "I'll ask our staff to call you back. Goodbye." (END, TRANSFER_CALLBACK).
+o No: reset nomatch, reject, slot_attempts, oos_streak and human_offers, then re-ask last_prompt.
+o Anything else: one clarification, "Shall I ask staff to call you back? Yes or no." If still unclear, re-ask once more and then continue the flow. Never end the call on ambiguity.
+* NOW_YN: yes goes to the R2 PRESENT reply; no resumes.
+* ANYTHING_ELSE: yes gives "Sure, what else can I do?" with pending=INTENT. No gives goodbye.
+* CHANGE_WHICH: accepts "the time", "the day", "the service", "the name", or a new value directly.
+* NAME, DATE, TIME, SERVICE: bare answers fill that slot via the matching parser.
+R7. INTENT AND FLOW SWITCH.
+* No active flow: the highest POS intent scoring 1.0 or more. Otherwise implicit BOOK if a POS service, date or time was extracted. Otherwise the no-match ladder.
+* Active flow and a different non-INFO intent scoring 2.5 or more: switch flows, discard the frame, and say "Okay, let's cancel instead."
+* INFO intents never switch flow: answer, then re-ask last_prompt.
+* RESCHEDULE (including "move that"): reply "I can't move appointments on this line. I can cancel it and book a new time, or ask staff to call you. Which would you like?" This is a VALUE OfferSet on intent (cancel and rebook, or callback) (U2).
+* After a booking (last_booking set, no active frame): "cancel that" binds to last_booking and skips verification, but still requires a CancelProposal readback and a yes. "Book another" starts a fresh frame with no stale slots.
+* Reaching a booking flow moves carry_exclusions into the frame.
+R8. SLOT FILL.
+* Extracted values go into the frame.
+* Same value: no-op. Different value: overwrite and acknowledge ("Okay, Thursday instead.").
+* Negation, multi-value and relative deltas per 5.4.
+* If a bare value is ambiguous between slots, pending wins.
+* Any change destroys the Proposal and drops offers, then calls one revalidate(frame). There is no per-slot dependency matrix.
+* Multi-slot (E5): keep every valid independent value, validate each changed slot, clear only the invalid slot or slots, and ask for the first remaining required slot. Validation order is service, date, time, so duration is known before the time is judged.
+R9. INCREMENTAL VALIDATION. check_date runs as soon as a date is set and check_time as soon as a time is set, using the precedence in 4.4.
+* A failed slot is cleared (only that slot), asked again, and slot_attempts[slot]++. At 3 failed attempts on one slot, offer HUMAN_YN.
+* Messages: 
+o CLOSED_DAY: "We're closed Sundays. Saturday or Monday?" (a VALUE OfferSet on date)
+o CLOSED_DATE: "We're closed that day for staff training. The next open day is Tuesday. Would that work?"
+o PAST: "That date has passed. Which day instead?"
+o BEYOND_HORIZON: "We book up to 60 days ahead. Which day sooner?"
+o LUNCH: "We're closed 1 to 2 for lunch. Would 12:30 or 2 PM work?" (U1). This is a VALUE OfferSet on time built from the reason context: the last valid start before lunch for this service, and 2 PM. If the service does not fit before lunch, offer only 2 PM.
+o AFTER_CLOSE: "We close at 5, so the last cleaning starts at 4:30. What time instead?" (service and day aware)
+o BEFORE_OPEN: "We open at 9. What time works?" (Saturday: 10)
+o TOO_SOON: "We need at least two hours notice. What later time works?"
+o OFF_GRID: "We book on the half hour. Would 3 or 3:30 work?" (a VALUE OfferSet on time)
+R10. AVAILABILITY. When service, date and time are valid, call is_free.
+* Not free (or DuplicateBooking): alternatives(), store them as a SLOT OfferSet, pending=OPTION, speak at most 3.
+* Empty: find_next_available() from that date. If found: "Nothing is left that day. The next opening is Tuesday at 10 AM. Would that work?" (a one-option OfferSet). If nothing within the horizon: "I can't find an opening in the next 60 days. Shall I ask staff to call you back?" with pending=HUMAN_YN.
+* Earliest flow (pref_mode=EARLIEST with a known service): find_next_available(n=2) from now (U4) and offer both.
+* Date plus window ("Friday morning"): offer the first 2 free starts inside the window.
+R11. VERIFICATION (cancel). Nothing about a booking is spoken before this passes.
+* The caller gives a confirmation code, or a name plus the appointment date. Both go only into VerifyState.
+* A code verifies if find_by_code matches.
+* A name plus date verifies only through the EXACT name tier. If the stated date matches exactly one EXACT candidate, it is verified. If it matches several (two appointments that day), ask "Which one, the 9 AM or the 3 PM?" as a VALUE OfferSet. This is allowed because the caller already proved name and date. CLOSE-tier matches never verify by themselves, and candidates are never spoken as a list.
+* Any failure gives one generic line, identical for unknown name, wrong date, close-only match and wrong code: "I couldn't find a matching appointment. You can also try the confirmation code." Nothing leaks.
+* verify_failures++ (session-wide). At 2, offer HUMAN_YN. At 4, lock verification for the session: every attempt gets the callback offer.
+* Bookings made in this session are pre-verified.
+* A stored verified id whose booking no longer exists is treated as unknown.
+R12. NEXT ACTION. First unfilled in order: intent, service, date, time, patient name.
+* When all are filled and valid and the slot is free, build a Proposal from the frame (frozen snapshot), say its readback, and set pending=CONFIRM_YN.
+* If ambiguous_ampm, the readback says "at 3 PM, in the afternoon".
+* After a verified cancel match, build a CancelProposal and read it back (R13).
+R13. CONFIRMATION AND COMMIT (the only place an effect is requested).
+A booking is requested only if ALL of these hold:
+1. pending=CONFIRM_YN and a Proposal exists.
+2. The previous reply ended with that Proposal's readback.
+3. The current utterance is a pure yes: no slot values, no negation, no intent.
+In that case the policy asks the engine for book(proposal) as the last step of the turn.
+Everything else when a Proposal exists:
+* Yes together with slot values, or any slot value at all: apply the change, which destroys the Proposal (I2, I4). Revalidate, run R10, and build a NEW Proposal with a fresh readback.
+* Bare "no": ask "What would you like to change?" with pending=CHANGE_WHICH. The Proposal is destroyed.
+* "No" with an abandon cue, or START_OVER or BYE: abandon. The frame is discarded, nothing is booked, and the reply is "Okay, I won't book it. Anything else?" (ABANDON).
+* REPEAT, HOLD, INFO and OOS replies re-ask the readback, so the Proposal survives. Any reply that does not end with the readback (emergency, silence end, flow switch) destroys it.
+Engine outcome handling:
+* Success: "You're all set. Your confirmation code is 4 7 2 9. Anything else?" Set last_booking, add the id to verified_booking_ids, reset the frame, pending=ANYTHING_ELSE.
+* SlotTaken or DuplicateBooking: drop the Proposal and offers, rerun R10, and say "Sorry, that slot was just taken." plus new alternatives (E1). A new confirmation is always required.
+* InvalidSlot(reason): clear the offending slot, speak the R9 message, and re-ask.
+CancelProposal works the same way. Yes books the cancel through BookingService.cancel(booking_id): "Done. Anything else?" and the id is removed from last_booking and verified ids. No: "Okay, I've left it as is. Anything else?" A "no" on a CancelProposal never cancels.
+R14. OFFERSET LIFECYCLE.
+* Created: offer_id = turn_index, only in Frame.offers, with pending=OPTION and the spoken list as last_prompt.
+* Resolved only against the current OfferSet, in this order: 
+1. ordinals ("the first", "number two", "option one");
+2. "earlier" or "later";
+3. an exact value match (a time or date matching exactly one option; matching several is ambiguous and gets CLARIFY_OPTION);
+4. "either", "whichever" or "any", which take the first;
+5. "neither", "none" or "no", which reject.
+* A SLOT pick sets date and time from the option's start, revalidates, rechecks availability, and builds a Proposal with a readback. It never books directly.
+* A VALUE pick sets the named slot (service, date, time, or intent) and re-runs R8 to R12, so duration and availability are recomputed.
+* Bare "yes" with two or more options gives CLARIFY_OPTION. Three CLARIFYs in a row count as a no-match.
+* A value that matches no option is a new slot value: the offers are dropped and R8 runs.
+* Rejection: reject++, SLOT starts go into rejected_starts, and the reply is "What day and time would suit you?" with pending=DATE. At 3 consecutive rejections, offer HUMAN_YN.
+* Dropped on: any slot change, rejection, replacement, flow switch, start over, task end, emergency, and end of call. Stale offers can never be selected, because an offer with a different offer_id from the current one does not exist (C5).
+R15. COMPOUND INTENT.
+* A primary flow intent (BOOK or CANCEL) plus an INFO intent in one utterance ("Cancel my appointment, and what are your hours?"): answer the info question first in one reply (up to 45 words), then continue the flow's next question.
+* Two conflicting flow intents, both positive ("cancel and book another"): "cancel and rebook" means RESCHEDULE, so the fallback reply applies. Otherwise ask a VALUE OfferSet on intent: "Would you like to cancel or book first?"
+* Queued intents are P2.
+R16. STRIKE VALVE.
+* At 3 no-matches, 3 failed attempts on one slot, 3 consecutive rejections, 3 out-of-scope in a row, 2 verification failures, or a command to speak to a human: offer HUMAN_YN.
+* noprogress counts consecutive turns that change no frame value and no pending. At 8, the assistant says "I'm sorry, I'm not able to help on this line. Staff will call you back. Goodbye." and ends with TRANSFER_CALLBACK. This is the only way a call ends on ambiguity.
+* At 200 turns: end with TURN_LIMIT.
+* A caller who declines the callback resets the relevant counters (R6).
+5.6 FLOWS
+BOOK (P0). Collect intent, service, date, time (a window is allowed), and patient name. Then the readback: "So that's a cleaning for Sarah on Friday, October 30th at 3 PM, about 30 minutes. Shall I book it?" Yes books and gives the code. Callers who open with "I need a cleaning on Friday" or "earliest available" enter through implicit intent or pref_mode=EARLIEST. Urgent callers hear "Sorry to hear that." first.
+CANCEL (P1). Ask "May I have your name and the appointment date, or your confirmation code?" Run R11. One verified match: "I found a cleaning on Tuesday, November 3rd at 10 AM. Cancel it?" Then R13. "Cancel that" right after a booking skips verification but still needs the CancelProposal yes.
+RESCHEDULE (fallback only). One defined reply from R7. Do not build the flow.
+INFO (P1). Answered from config, then re-ask the pending question if a flow was active.
+* Hours are date-aware: "are you open tomorrow?" checks weekly hours and CLOSED_DATES. "We're open 9 to 5 tomorrow, closed 1 to 2 for lunch." A closed date answers with its reason.
+* Duration: with a service, state its length. Without one: "A cleaning or checkup takes 30 minutes, a filling, whitening or extraction 60, and a root canal 90."
+* Services: two groups of three, "Checkups, cleanings and whitening. Or fillings, extractions and root canals."
+5.7 FAILURE HANDLING
+* NO MATCH (nothing extracted, not a command, filler or out-of-scope): nomatch++. 
+o 1: "Sorry, I didn't catch that." plus a re-ask.
+o 2: a re-ask with an example ("for example, next Tuesday at 10 AM").
+o 3: HUMAN_YN offer. A successful extraction resets the counter.
+* LOW STT CONFIDENCE: treat 0 or missing as unknown. Only a value strictly between 0 and 0.5 with nothing extracted counts as a no-match. With something extracted it proceeds, because the readback catches errors. lowconf_streak is traced only.
+* REJECTIONS: reject counts consecutive "no" answers to offers. At 3, offer a human.
+* SLOT ATTEMPTS: 3 failed attempts at one slot offers a human.
+* FLOW SWITCH discards the frame but keeps session data.
+* ENGINE EXCEPTIONS: the engine catches everything, leaves state unchanged, and returns "I'm having trouble, one moment. Could you say that again?" with action ERROR_RECOVERY. Only the exception class is logged.
+* SESSION EXPIRY AND RESTART (E7): see section 6.
+5.8 NLG
+* Templates are keyed by action, 2 or 3 variants each, picked by turn_index % n.
+* Dates are spoken as "Friday, October 30th". Times are spoken as "3 PM" or "3:30 PM". Codes are spoken digit by digit ("4 7 2 9").
+* Greeting: "Thanks for calling Bright Smile Dental. This is the automated assistant. I can book or cancel an appointment. How can I help?" It says it is automated, consistent with the ROBOT reply.
+* A lint test renders every template with sample values and asserts the word limits from 5.1.
+5.9 TRACE SCHEMA (what the UI shows)
+{
+"turn": 4,
+"input": {"type": "utterance", "text": "...", "confidence": 0.91},
+"normalized": "...",
+"intent_scores": {"BOOK": 2.0, "CANCEL": 0.0},
+"extracted": [{"slot": "date", "value": "2026-10-30", "span": "next friday", "extractor": "dates", "polarity": "pos", "clause": 0}],
+"phase_before": "COLLECTING", "phase_after": "CONFIRMING",
+"pending_before": "TIME", "pending_after": "CONFIRM_YN",
+"rules_fired": ["R8.fill:date", "R9.ok", "R10.free", "R12.confirm"],
+"counters": {"silence": 0, "nomatch": 0, "reject": 0},
+"offers": null, "proposal": {"service": "cleaning", "start": "..."},
+"effect": null,
+"action": "ASK_CONFIRM",
+"reason": "all required slots filled and slot is free"
+}
+Actions enum: GREET, ASK_SLOT, ASK_CONFIRM, OFFER_ALTERNATIVES, OFFER_VALUES, CLARIFY_OPTION, CLARIFY_COMPOUND, ASK_VERIFY, VERIFY_FAILED, BOOK, CANCEL_BOOKING, ABANDON, RESCHEDULE_FALLBACK, ANSWER_INFO, OUT_OF_SCOPE, EMERGENCY, ASK_NOW_YN, ACK_NOTED, REPEAT, HOLD, WAIT, REJECT_INVALID, CLARIFY_NOMATCH, SILENCE_REPROMPT, TRANSFER, GOODBYE, ERROR_RECOVERY.
+======================================================================
+SECTION 6. API SPEC
+* POST /api/sessions creates a session and returns the greeting: {session_id, turn_no: 0, reply_text, ended, end_reason, phase, pending, frame, counters, last_booking, trace}. Session IDs are unguessable (secrets.token_urlsafe(16)).
+* POST /api/sessions/{id}/turns takes {turn_no: int >= 1, type: "utterance" | "silence" | "hangup", text?: str, confidence?: float 0..1} and returns the same shape. 
+o text is required for utterances and capped at 500 characters.
+o reply_text may be empty (actions HOLD and WAIT). The client must not speak and keeps listening.
+* IDEMPOTENCY: turn_no must equal last_turn_no + 1 for a new turn. The same turn_no as the last processed turn returns the stored response without re-running the brain. Anything else (lower, or skipping ahead) returns 409. This stops typed-plus-voice double-submits and retry duplicates.
+* CONCURRENCY: one lock per session around each turn. The repository has its own RLock. Run a single uvicorn worker and document it.
+* SESSION EXPIRY (E7): a 30-minute idle TTL with lazy cleanup. An expired or unknown id returns 404. The frontend then shows "The call timed out. Starting a new call." and starts a new session. A committed booking exists only in the repository, and the UI marks a booking as made only when a response contains action BOOK. Nothing uncommitted is ever shown as booked.
+* GET /api/demo/bookings lists seeded fake bookings and their codes. It is only mounted when DEMO_ENDPOINTS_ENABLED=true.
+* GET /health.
+* ERRORS: 404 unknown or expired session, 409 turn on an ended session or a wrong turn_no, 422 validation. A global exception handler turns anything unexpected into a JSON error. The brain itself never returns a 500. Max 200 turns per session (TURN_LIMIT).
+* CORS from CORS_ORIGINS. No secrets are needed anywhere. .env.example holds only non-secret config.
+* LOGGING: log a short hash of the session ID, the turn number, action and rule IDs. Never log names or utterance text unless LOG_UTTERANCES=true (default false).
+======================================================================
+SECTION 7. FRONTEND AND VOICE SPEC
+PAGE LAYOUT (Next.js App Router, TypeScript)
+* A call panel with a start/end call button, a mic button, a locale dropdown (en-US, en-GB, en-IN) and a status line (listening, thinking, speaking).
+* A transcript showing caller and assistant lines.
+* A typed input, always visible and first-class.
+* A decision trace panel for the latest turn, showing: normalized text, intent scores, extracted values with polarity, rules_fired, action and reason, pending and phase before and after, counters, the current Proposal, the current OfferSet, and the frame. A "raw JSON" toggle.
+* A demo bookings panel (seeded fake names and codes), only when the demo endpoint is available.
+* An error banner for backend failures.
+HOOKS AND CLIENT LOGIC
+* useSpeechRecognition: interim and final results, confidence, and an 8-second silence timer that sends a silence event. It falls back to typed mode when unsupported or when permission is denied, with a visible notice (Chrome or Edge only).
+* useSpeechSynthesis: the mic is off while the assistant speaks, and it turns back on at the end event (with a safety timeout if the end event never fires). An empty reply_text is not spoken and the mic stays on.
+* useCall: owns turn_no, an in-flight lock so typed and voice submissions cannot double-send, and retries. 
+o A failed request is retried with the SAME turn_no, up to 3 times with backoff, and the server replays.
+o A 409 triggers a state resync, a 404 starts a new session, and after retries are exhausted the UI shows "The assistant is unavailable" with a retry button.
+* lib/api.ts is a thin typed client. All state shown comes from server responses.
+FRONTEND TESTS (Vitest)
+* API client retry sends the same turn_no.
+* The in-flight lock blocks a double submit.
+* The silence event is sent after the timer.
+* The trace panel renders rules, extractions and offers.
+* The 404 path starts a new session.
+* Empty reply_text is not spoken.
+======================================================================
+SECTION 8. TEST PLAN
+8.1 DOMAIN TESTS (table-driven)
+check_date and check_time with every reason and the precedence order, including Saturday hours and the service and day aware context. Lunch and window-end behavior. Alternatives (before/after preference, next-day fill, exclusions, rejected, empty case). find_next_available, including no-date earliest and horizon limits. Repository tiers (EXACT, CLOSE, no last-name-only), duplicates, code uniqueness. BookingService re-validation (I3). All T1 time tests (a) to (e). Seed invariants: never past, never Sunday or closed date, fixed bookings present.
+8.2 NLU UNIT TESTS
+Normalization, homophones scoping, clause splitting, polarity, repair versus exclusion, each extractor, whole-word matching ("exam" vs "example", "fill out", "closest"), relative deltas, name patterns and caller versus patient, number words for times and codes, weekday and date conflict.
+8.3 NLU EVALUATION SET
+* About 150 labeled utterances (40 in the 3-hour plan), covering intent, slots and polarity, including messy STT-style input.
+* Split into dev (about 70%) and held-out (about 30%) BEFORE tuning, and commit the split. The held-out set is not looked at while tuning.
+* Report in DESIGN.md: intent accuracy, slot-level precision and recall, polarity accuracy, dev versus held-out numbers, and an honest list of known misses. Note the author-bias caveat (the set was written by the same people who wrote the rules).
+8.4 SCENARIO TESTS (sequences through the public brain interface)
+Each asserts replies, state, action, rules fired and repository mutations.
+P0 (S1 to S20):
+* S1 Happy path, slots collected one at a time, readback, yes, code.
+* S2 All slots in one utterance ("a cleaning Friday at 3 for Sarah").
+* S3 Implicit intent from a service and date.
+* S4 Slot taken, alternatives offered, "the second one", fresh readback, yes.
+* S5 Empty same-day alternatives, next opening offered.
+* S6 Earliest available with no date.
+* S7 Stale confirmation: readback Friday 3 PM, "actually Saturday", fresh readback, "yes" books Saturday only, never Friday (C3). Repeat for every field and for corrections to an invalid or occupied slot.
+* S8 Self-repair "Friday, no wait, Saturday".
+* S9 Negation and exclusion ("not Friday", "not Friday, Thursday", "can't do mornings") respected by alternatives and earliest search.
+* S10 Polarity of intents and symptoms: "I don't want to cancel; I want to book" starts BOOK; "my face isn't swollen" fires nothing; an embedded positive symptom with a booking request fires R2 (C1).
+* S11 Negated-only utterances in an empty session start no flow; a later booking respects the carried exclusion (C2).
+* S12 "Yes but 4 pm" and "no, make it Thursday" are corrections, never confirmations (I2).
+* S13 Caller versus patient: "for my son Ali", "I'm Mike, it's for my wife", self-to-other, other-to-self (E2).
+* S14 Both OfferSet kinds: VALUE ("a filling or a cleaning", "Friday or Saturday") and SLOT, "the second", "either".
+* S15 Stale offers: after rejection and a new offer, "the first one" resolves only against the new set; a value matching no option is a new slot value; offers dropped on any change (C5).
+* S16 Each validation reason (Sunday, closed date, lunch, root canal after close, Saturday 9 AM, off-grid 3:15, past, beyond horizon) gives the exact message and clears only that slot (E5).
+* S17 Slot race: the slot disappears between readback and "yes" (fault-injecting BookingPort), no booking is made, new alternatives are offered, and a new confirmation is required (E1).
+* S18 Replay of the same turn_no creates one booking (I6).
+* S19 STT noise: homophones, "5:30 p.m.", "five thirty", low confidence with and without extractions, valid but wrong values corrected at readback (E4).
+* S20 Multi-slot with one invalid value keeps the valid ones (E5), and abandonment ("no, never mind") versus correction ("no, Saturday") versus bare "no".
+P1 (S21 and up):
+* S21 Cancel by code, CancelProposal, yes, cancelled. "Cancel that" after a booking.
+* S22 Verification with decoys: Sara Thomson, same-day double booking ("Which one, the 9 AM or the 3 PM?"), wrong name, wrong date, wrong code and close-only match all give the identical generic line; no disclosure and no mutation; strike counts and lock (C4).
+* S23 A name alone never cancels; Sarah Thompson has two bookings and is disambiguated by date.
+* S24 "No" at the cancel readback leaves the booking.
+* S25 Info questions (hours, closed date, duration, services) answered with the flow resumed.
+* S26 Silence ladder, hold grace, filler streak.
+* S27 Command gating ("wait, make it Thursday" applies Thursday); HUMAN always fires; ROBOT; REPEAT keeps the Proposal; START_OVER.
+* S28 Emergency past and ambiguous go through NOW_YN; negated is ignored.
+* S29 Out-of-scope replies and the streak.
+* S30 Compound intent (R15).
+* S31 Session and retry boundaries: expiry in each phase, ended session 409, the 200-turn cap, restart behavior, repeated turn numbers (E7).
+* S32 Reschedule fallback and "move that" (U2).
+* S33 Weekday and date conflict VALUE OfferSet.
+* S34 Hint plus exclusion lifecycle ("next week, but not Tuesday", then "earliest available") per the lifecycle table (E3).
+* S35 Strike valve end to end (R16).
+* S36 Relative corrections and "same time next week".
+8.5 IMPORT GUARD
+test_import_guard.py walks every module in assistant/brain with ast and fails on:
+* any import outside the allowed list (standard library items in decision 4, plus assistant.domain types and assistant.brain);
+* any import from assistant.api;
+* any call to datetime.now, datetime.utcnow, time.time, random, os.environ, open, or any network or subprocess module.
+No AI SDK may appear in any backend dependency.
+8.6 STATEFUL INVARIANT TEST (hypothesis RuleBasedStateMachine over whole conversations)
+Rules send utterances drawn from a corpus pool (valid, messy, negated, commands, numbers), silence events, hangups, replays, and fault injections (slot disappears, booking removed). A spy BookingPort records every call. The invariants checked after each step:
+* I1: A booking is created only from a Proposal whose readback was the previous reply and that was confirmed by a pure yes this turn.
+* I2: A yes or no combined with slot values never confirms.
+* I3: An invalid or occupied slot is never booked.
+* I4: Any change to a proposed booking destroys the Proposal and drops offers.
+* I5: A failed verification never reveals appointment details and never mutates.
+* I6: Replaying a processed turn does not mutate twice.
+* I7: The same initial state and inputs produce identical outputs (determinism).
+* I8: At most one effect happens per turn, and it happens last.
+* I9: A negated or exclusion-only utterance never starts a flow or fills a slot.
+* I10: A stale OfferSet is never resolvable.
+* I11: No booking details are spoken unless the id is in verified_booking_ids.
+* I12: An ended session never mutates, and the brain never raises (state is unchanged on any exception).
+8.7 FUZZ TEST
+Arbitrary unicode and mixed text, empty strings, very long strings, and digit-heavy strings never raise. Replies respect word limits (HOLD and WAIT are empty by design).
+8.8 DETERMINISM TEST
+Run a recorded conversation twice with a FixedClock and identical ports, then compare replies, traces and state.
+8.9 API TESTS
+Idempotent replay, stale turn_no 409, ended-session 409, unknown or expired session 404, 422 validation, text cap, 200-turn cap, TTL expiry, demo endpoint gating, and two threads racing for one slot (exactly one wins, the other gets alternatives).
+8.10 GATES (scripts/check.sh)
+1. ruff check and ruff format --check
+2. pytest (scenarios, invariants, determinism, fuzz, import guard, API)
+3. frontend lint, typecheck, Vitest and build
+4. secrets grep (for common key patterns and .env files)
+5. a check that README.md, DESIGN.md and AI_USAGE.md exist and docs/ai-usage/ is not empty
+======================================================================
+SECTION 9. BUILD SCHEDULE (about 5 hours)
+0:00 to 0:35 Scaffold and domain core.
+Repo, pyproject, config, clock with T1 helpers, models, hours, services, availability functions and their table tests.
+Done when: the time tests (a) to (e) and the availability tables pass.
+0:35 to 1:00 Repository, BookingService, codes, seed.
+Done when: service re-validation and seed invariants pass. CHECKPOINT A at 1:00: domain green. If not, drop the seed random fill to fixed bookings only.
+1:00 to 1:50 NLU core and the eval set.
+normalize, clauses and polarity, dates, times, services, yes/no, names, options, commands, emergency. Write the eval set first and freeze the held-out split.
+Done when: NLU unit tests pass and the dev eval runs.
+1:50 to 3:00 Brain P0 (scenario tests first).
+types, engine, policy R0 to R14 for the book flow, NLG. Write S1 to S9 first.
+CHECKPOINT B at 2:50: S1 to S9 green. If not, cut per section 11 now.
+3:00 to 3:30 Finish P0 and the invariants.
+S10 to S20, the stateful test, fuzz, determinism, import guard.
+CHECKPOINT C at 3:30: all P0 backend tests green.
+3:30 to 3:50 API and sessions (idempotency, TTL, caps) and API tests.
+3:50 to 4:25 Frontend: mic and typed input, trace panel, retry and error handling, Vitest tests.
+4:25 to 4:45 P1 as time allows, in this order: cancel flow (S21 to S24), info and commands (S25 to S27), emergency NOW_YN (S28), remaining scenarios.
+4:45 to 5:00 Docs and PR: eval report, DESIGN.md, README, AI_USAGE with real numbers and screenshots, run scripts/check.sh, open the pull request.
+Working method with AI tools (this is evidence for AI_USAGE.md): give the agent this plan, have it write the scenario test first, review every policy diff yourself, and keep the commits small.
+======================================================================
+SECTION 10. AI_USAGE.md PLAN
+Required content (TASK.md):
+* Which AI tools were used. Include the planning phase (drafting v2, the review, v4 and this final plan).
+* How they helped (planning, scaffolding, tests, parser edge cases, docs).
+* WHERE THEY GOT THINGS WRONG. Log real cases as they happen, for example a hallucinated library, a rule that violated an invariant, a spec that was cut off, or a test that passed for the wrong reason. Say what you changed.
+* How many tokens were used: one table per tool and session (tool, date, purpose, input tokens, output tokens, source). Add exports or screenshots under docs/ai-usage/. If a tool does not show tokens, say so plainly and give a rough estimate labeled as an estimate.
+* A statement that the brain contains no AI model calls and how it is enforced (the import guard and the dependency list).
+Log as you go, not at the end.
+======================================================================
+SECTION 11. CUT ORDER (if time is short)
+Cut in this order, top first:
+1. All P2 items, then CI and the Makefile.
+2. Frontend polish: fall back to transcript plus raw JSON trace.
+3. R15 compound intent (fall back to the precedence rules and answer the info question after).
+4. Multi-value clarification beyond the date and service cases.
+5. Relative corrections.
+6. NOW_YN (treat past and ambiguous as a single clarifying question without a separate pending state).
+7. Info questions beyond hours.
+8. The cancel flow, last.
+NEVER CUT:
+* R13 confirmation snapshot and BookingService re-validation.
+* R14 typed OfferSets and their lifecycle.
+* Polarity handling.
+* The import guard and determinism test.
+* The stateful invariants.
+* R11 verification, if the cancel flow ships at all.
+* AI_USAGE.md with real usage numbers.
+======================================================================
+SECTION 12. FINDINGS MAP (review items and extra findings)
+REVIEW ITEMS
+* C1 Negation in intents and emergency: polarity in 5.4, R2, R7, S10, I9.
+* C2 Negated values triggering implicit booking: implicit BOOK rule, carry_exclusions, S11, I9.
+* C3 Stale confirmation: Proposal snapshot, R13, S7, I1, I2, I4.
+* C4 Verification: exact-then-close tiers, VerifyState, R11, S22, S23, I5, I11.
+* C5 Option confusion: typed OfferSets, R14, S14, S15, I10.
+* U1 Time recovery prompt versus the P2 parser: R9 LUNCH is a VALUE OfferSet.
+* U2 Reschedule cut but referenced: decision 12, R7 fallback, S32.
+* U3 Compound intent: R15, S30.
+* U4 Earliest with no date: 4.4 find_next_available and R10, S6.
+* U5 "No" versus abandon: R13, S20.
+* U6 Lifetime of last_booking: lifecycle table in 5.3.
+* E1 Concurrent booking: BookingService under the lock, R13 outcome handling, S17, API race test.
+* E2 Caller versus patient: Frame.caller_name and for_other rules, S13.
+* E3 Hints, exclusions and preferences: lifecycle table, S34.
+* E4 Valid but wrong STT: principle 14, readback, S19.
+* E5 Multiple slots in one utterance: R8, S16, S20.
+* E6 Emergency context: R2 and the classes, S10, S28.
+* E7 Session expiry and restart: section 6, S31.
+* T1 Time and timezone: 4.1 and its tests.
+EXTRA FINDINGS (X1 to X14; v3's original definitions were lost, so these are re-derived)
+* X1 Morning defined from 09:00 is wrong on Saturday: morning is a start before 12:00.
+* X2 Seed bookings must never land on Sundays or closed dates.
+* X3 A start crossing a window end reports LUNCH if the window ends at lunch, otherwise AFTER_CLOSE.
+* X4 Afternoon as 14:00 to 17:00 is empty on Saturdays: afternoon is a start at or after 12:00.
+* X5 Reason messages must carry the day's actual hours and the service's last valid start.
+* X6 "Change", "switch" and "make it" during an active frame are corrections, not RESCHEDULE.
+* X7 No last-name-only matching in the repository.
+* X8 A stray "yes" outside a yes/no pending never commits anything.
+* X9 Cancel needs a CancelProposal with the same snapshot lifecycle as a booking.
+* X10 Confirmation codes must be unique among all bookings.
+* X11 Closed dates are seeded relative to the clock so the info question has a real answer.
+* X12 Homophone mapping is scoped so "for Friday" is untouched.
+* X13 The INFO_SERVICES list is the single, tested exception to the 3-item spoken limit.
+* X14 A strike valve (R16) ends every loop, and ambiguity alone never ends a call before it.
+======================================================================
+SECTION 13. DOCUMENT SKELETONS
+README.md
+* What it is, and the "brain is our own code" statement.
+* Requirements: Python 3.11+, Node 20+, Chrome or Edge for voice.
+* Backend setup and run (a single uvicorn worker), frontend setup and run, .env.example variables, the demo endpoint and seeded codes.
+* How to run the gates (scripts/check.sh) and the tests.
+* Known limits in one short list, linking to DESIGN.md.
+DESIGN.md (use sections 4 to 7 as the skeleton)
+1. Use case and scope. 2. Architecture: pipeline, ports, engine and commit rule. 3. State model: Frame, Proposal, OfferSet, lifecycle table. 4. NLU: polarity, parsers and ambiguity decisions. 5. Policy rules R0 to R16 and the twelve invariants. 6. Safety design: verification, emergency, confirmation snapshots, the strike valve. 7. Time handling (T1). 8. Testing strategy and the NLU evaluation report (dev and held-out numbers, known misses). 9. Decisions made while building. 10. Limitations (the scope cuts in decision 6, demo-grade identity check, half-duplex voice, browser STT accuracy, simulated callback, "next Friday" ambiguity). 11. Future work (the Cut and P2 lists).
+AI_USAGE.md: section 10.
+PULL REQUEST DESCRIPTION: a short summary, how to run, how to test, a link to DESIGN.md, a note on what was cut and why, and the gate output.
+DEFINITION OF DONE CHECKLIST (copy into the PR)
+[ ] scripts/check.sh passes
+[ ] S1 to S20 green (and S21+ as time allowed), stateful invariants I1 to I12 green
+[ ] No AI model in the brain; the import guard passes
+[ ] NLU eval report with dev and held-out numbers
+[ ] No secrets and no real data in the repo
+[ ] README, DESIGN, AI_USAGE complete, with usage logs or screenshots
+[ ] Pull request open
+END OF PLAN
+
